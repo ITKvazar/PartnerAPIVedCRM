@@ -1,0 +1,2046 @@
+openapi: 3.1.0
+
+info:
+  title: Fable Partner API
+  version: 1.0.0
+  description: |
+    Партнёрское API сервиса **Fable** для интеграции по ключам.
+
+    ## Назначение
+    API предназначено для внешних партнёров, которые интегрируются с платформой Fable
+    для работы со справочником валют, контрактами и заявками на трансграничные платежи
+    (международные переводы по экспортным/импортным/транзитным контрактам).
+
+    Через это API партнёр может:
+    - получать справочник валют и их курсы;
+    - получать список своих контрактов и детальную информацию по ним;
+    - предварительно рассчитывать сумму к перечислению (deposit) и комиссию;
+    - создавать заявки на платёж;
+    - прикладывать к заявкам документы;
+    - получать статус заявок (через периодический опрос — polling);
+    - скачивать акт по заявке в формате PDF.
+
+    ## Авторизация
+    Авторизация выполняется по протоколу **OAuth2 Client Credentials**.
+
+    1. Партнёр получает пару `client_id` / `client_secret` (выдаётся в рамках внутреннего
+       процесса онбординга, вне данного API).
+    2. Партнёр обращается к `POST /auth/token` с `grant_type=client_credentials`, передавая
+       `client_id` и `client_secret`, и получает `access_token` (TTL ~4 часа) и
+       `refresh_token` (TTL ~2 дня).
+    3. Все последующие запросы выполняются с заголовком `Authorization: Bearer <access_token>`.
+    4. По истечении срока действия `access_token` партнёр обновляет пару токенов через
+       `POST /auth/token/refresh`, не повторяя полную аутентификацию.
+
+    Все методы, кроме `POST /auth/token` и `POST /auth/token/refresh`, требуют действующий
+    bearer-токен.
+
+    ## Доступ к чужим ресурсам
+    Партнёр работает только со своими контрактами и заявками. При обращении к ресурсу,
+    который не принадлежит партнёру, API намеренно возвращает `404 Not Found` (а не `403`),
+    чтобы не раскрывать факт существования чужих объектов. Отдельного ответа `403 Forbidden`
+    в API нет.
+
+    ## Ограничение частоты запросов (rate limiting)
+    Часть методов (в частности polling-методы `GET /applications` и
+    `GET /applications/{application_id}`) защищены ограничением частоты запросов. При
+    превышении лимита возвращается `429 Too Many Requests`. Рекомендуемый интервал опроса —
+    не чаще одного запроса в 30–60 секунд на заявку.
+
+    ## Модель отслеживания статуса (polling)
+    Вебхуки **не поддерживаются**. Статус заявки отслеживается партнёром самостоятельно
+    путём периодического опроса методов `GET /applications` и `GET /applications/{application_id}`.
+    Рекомендуемый интервал опроса — не чаще одного запроса в 30–60 секунд на заявку.
+
+    ## Жизненный цикл заявки
+    1. (Опционально) `GET /applications/calculate-deposit` — предварительный расчёт.
+    2. `POST /applications` — создание заявки. Заявка создаётся в статусе `on_inspect`.
+    3. `POST /applications/{application_id}/documents` — приложение документов к созданной
+       заявке (порядок: сначала заявка, затем документы).
+    4. `GET /applications/{application_id}` — опрос статуса.
+    5. `GET /applications/{application_id}/act` — получение акта в PDF, когда заявка дошла
+       до соответствующего статуса.
+
+    Партнёр **не изменяет** и **не отменяет** заявку — соответствующих методов в API нет.
+
+    ## Соглашения
+    - Все денежные/`decimal`-поля передаются строкой (`type: string`) с ограничением формата
+      через `pattern`, поскольку `format: decimal` не валидируется стандартными
+      OpenAPI-валидаторами.
+    - Для свойств, ссылающихся на enum-схемы через `$ref`, пример берётся из самой
+      enum-схемы (`example` внутри схемы перечисления). Это считается достаточным
+      для требования «у каждого поля есть example».
+  contact:
+    name: Fable Integration Support
+    email: integration@fable.example
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+
+servers:
+  - url: https://{environment}.fable.example/v1
+    description: Базовый URL Fable Partner API. Хост зависит от окружения.
+    variables:
+      environment:
+        default: api
+        enum:
+          - api
+          - api-sandbox
+        description: |
+          Окружение:
+          - `api` — продуктивное окружение;
+          - `api-sandbox` — тестовое (песочница).
+
+tags:
+  - name: Auth
+    description: |
+      Аутентификация по OAuth2 Client Credentials. Получение и обновление пары токенов
+      (access + refresh). Методы этого раздела не требуют bearer-токена.
+  - name: Currencies
+    description: |
+      Справочник валют: список валют с курсами и получение одной валюты по ISO-коду.
+  - name: Contracts
+    description: |
+      Контракты партнёра. «Несколько компаний» реализуется через контракты — каждый
+      контракт описывает условия сделки (тип, валюта, тариф, условия платежа).
+  - name: Applications
+    description: |
+      Заявки на платёж: предварительный расчёт, создание, получение списка и деталей,
+      приложение и получение документов, скачивание акта. Отслеживание статуса — через polling.
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  /auth/token:
+    post:
+      tags: [Auth]
+      summary: Получить пару токенов (Client Credentials)
+      operationId: createToken
+      security: []
+      description: |
+        Выдаёт пару токенов (`access_token` + `refresh_token`) по учётным данным партнёра.
+        Используется grant `client_credentials`. Тело передаётся в формате
+        `application/x-www-form-urlencoded` согласно спецификации OAuth2.
+
+        `access_token` действует ~4 часа (`expires_in = 14400`), `refresh_token` — ~2 дня
+        (`refresh_expires_in = 172800`). Все защищённые методы вызываются с заголовком
+        `Authorization: Bearer <access_token>`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+            example:
+              grant_type: client_credentials
+              client_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+              client_secret: "s3cr3t_K9xQzv7Lp2mWnR4tYbHdFa"
+      responses:
+        '200':
+          description: Пара токенов успешно выдана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+              example:
+                access_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGllbnQifQ.aaa"
+                token_type: "Bearer"
+                expires_in: 14400
+                refresh_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiUkVGUkVTSCJ9.bbb"
+                refresh_expires_in: 172800
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Неверные `client_id` / `client_secret`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Invalid client credentials."
+        '422':
+          description: Ошибка валидации тела запроса токенов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              example:
+                detail:
+                  - loc: ["body", "client_secret"]
+                    msg: "field required"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/token/refresh:
+    post:
+      tags: [Auth]
+      summary: Обновить пару токенов
+      operationId: refreshToken
+      security: []
+      description: |
+        Выдаёт новую пару токенов (`access_token` + `refresh_token`) по действующему
+        `refresh_token`. Используется grant `refresh_token`. Полная повторная аутентификация
+        по `client_secret` не требуется, но `client_id` передаётся для идентификации партнёра.
+
+        Если `refresh_token` истёк или недействителен — возвращается `401`, и партнёр должен
+        заново получить токены через `POST /auth/token`.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+            example:
+              grant_type: refresh_token
+              refresh_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiUkVGUkVTSCJ9.bbb"
+              client_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+      responses:
+        '200':
+          description: Новая пара токенов успешно выдана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+              example:
+                access_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ 9.eyJzdWIiOiJjbGllbnQifQ.ccc"
+                token_type: "Bearer"
+                expires_in: 14400
+                refresh_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiUkVGUkVTSCJ9.ddd"
+                refresh_expires_in: 172800
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: "`refresh_token` истёк или недействителен. Требуется повторная аутентификация."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Token expired."
+        '422':
+          description: Ошибка валидации тела запроса обновления токенов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              example:
+                detail:
+                  - loc: ["body", "refresh_token"]
+                    msg: "field required"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /currencies:
+    get:
+      tags: [Currencies]
+      summary: Список валют
+      operationId: listCurrencies
+      description: |
+        Возвращает постраничный список валют справочника с курсами обмена.
+        Поддерживает пагинацию (`limit` / `offset`), фильтрацию по идентификаторам и именам,
+        а также сортировку.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: id__in
+          in: query
+          required: false
+          description: Фильтр по списку идентификаторов валют (повторяемый параметр).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+          example:
+            - "550e8400-e29b-41d4-a716-446655440000"
+            - "660e8400-e29b-41d4-a716-446655440001"
+        - name: name__in
+          in: query
+          required: false
+          description: Фильтр по списку наименований валют (повторяемый параметр).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+          example:
+            - "US Dollar"
+            - "Euro"
+        - name: order_by
+          in: query
+          required: false
+          description: |
+            Сортировка по полям. Префикс `-` означает убывание.
+            Допустимые поля: `code`, `name`, `exchange_rate` и их `-`-варианты.
+            Повторяемый параметр.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - code
+                - "-code"
+                - name
+                - "-name"
+                - exchange_rate
+                - "-exchange_rate"
+          example:
+            - "code"
+      responses:
+        '200':
+          description: Постраничный список валют.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluralCurrencyResponse'
+              example:
+                currencies:
+                  - id: "550e8400-e29b-41d4-a716-446655440000"
+                    code: "USD"
+                    symbol: "$"
+                    name: "US Dollar"
+                    exchange_rate: "92.5000"
+                    code_number: 840
+                  - id: "660e8400-e29b-41d4-a716-446655440001"
+                    code: "EUR"
+                    symbol: "€"
+                    name: "Euro"
+                    exchange_rate: "100.1200"
+                    code_number: 978
+                total_count: 15
+                next_page_offset: 20
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /currencies/{code}:
+    get:
+      tags: [Currencies]
+      summary: Получить валюту по коду
+      operationId: getCurrencyByCode
+      description: Возвращает одну валюту по буквенному коду ISO 4217 (например `USD`).
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: |
+            Буквенный код валюты по ISO 4217 (3 заглавные латинские буквы).
+            Серверная валидация формата по умолчанию не выполняется — параметр
+            обрабатывается как обычная строка; `pattern` приведён как ожидаемый формат.
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          example: "USD"
+      responses:
+        '200':
+          description: Валюта найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SingleCurrencyResponse'
+              example:
+                currency:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  code: "USD"
+                  symbol: "$"
+                  name: "US Dollar"
+                  exchange_rate: "92.5000"
+                  code_number: 840
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Валюта с таким кодом не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Currency not found."
+                entity_id: "USD"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /contracts:
+    get:
+      tags: [Contracts]
+      summary: Список контрактов
+      operationId: listContracts
+      description: |
+        Возвращает постраничный список контрактов партнёра. Поддерживает пагинацию,
+        текстовый поиск и фильтрацию по типу контракта. Внутренние поля (банк, менеджер,
+        тенант, признак удаления, связанные заявки) в выдачу не включаются.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: search_value
+          in: query
+          required: false
+          description: Текстовый поиск по номеру контракта и наименованию компании.
+          schema:
+            type: string
+          example: "CNT-2024"
+        - name: contract_type
+          in: query
+          required: false
+          description: Фильтр по типу контракта.
+          schema:
+            $ref: '#/components/schemas/ContractTypeEnum'
+          example: "export"
+      responses:
+        '200':
+          description: Постраничный список контрактов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluralContractResponse'
+              example:
+                deal_contracts:
+                  - id: "550e8400-e29b-41d4-a716-446655440000"
+                    number: "CNT-2024-0001"
+                    type: "export"
+                    date_signature: "2024-01-15T10:30:00Z"
+                    delivery_time: "2024-02-15T23:59:59Z"
+                    amount: "50000.500"
+                    credit_limit: "100000.000"
+                    terms: "prepayment"
+                    currency_id: "550e8400-e29b-41d4-a716-446655440002"
+                    tariff_id: "550e8400-e29b-41d4-a716-446655440001"
+                    relationship_contract_id: "550e8400-e29b-41d4-a716-446655440003"
+                    currency:
+                      id: "550e8400-e29b-41d4-a716-446655440002"
+                      code: "USD"
+                      symbol: "$"
+                      name: "US Dollar"
+                      exchange_rate: "92.5000"
+                      code_number: 840
+                    tariff:
+                      id: "550e8400-e29b-41d4-a716-446655440001"
+                      value: "10.00000"
+                      percentage: "0.50000"
+                      tariff_type: "fixed_and_percentage"
+                      name: "Standard Tariff"
+                      created_at: "2024-01-01T12:00:00Z"
+                      updated_at: "2024-01-15T12:00:00Z"
+                    company:
+                      id: "550e8400-e29b-41d4-a716-446655440004"
+                      full_legal_name: "ООО Импортер-Экспортер"
+                      inn: "7712345678"
+                      short_name: "ИмпЭксп"
+                      type: "buyer"
+                      ogrn: "1057712345678"
+                      okpo: "12345678"
+                      legal_address: "Москва, ул. Ленина, д. 10"
+                      postal_address: "Москва, ул. Ленина, д. 10"
+                      date_registration: "2020-01-15T00:00:00Z"
+                      manager_id: null
+                    relationship_contract:
+                      id: "550e8400-e29b-41d4-a716-446655440003"
+                      number: "REL-2024-0001"
+                      date_signature: "2024-01-10T09:00:00Z"
+                      tariff_id: "550e8400-e29b-41d4-a716-446655440001"
+                      company_id: "550e8400-e29b-41d4-a716-446655440004"
+                total_count: 150
+                next_page_offset: 20
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /contracts/{contract_id}:
+    get:
+      tags: [Contracts]
+      summary: Получить контракт
+      operationId: getContract
+      description: |
+        Возвращает детальную информацию по одному контракту по его идентификатору.
+        Если контракт не принадлежит партнёру или не существует — возвращается `404`.
+      parameters:
+        - name: contract_id
+          in: path
+          required: true
+          description: Идентификатор контракта.
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: Контракт найден.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SingleContractResponse'
+              example:
+                deal_contract:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  number: "CNT-2024-0001"
+                  type: "export"
+                  date_signature: "2024-01-15T10:30:00Z"
+                  delivery_time: "2024-02-15T23:59:59Z"
+                  amount: "50000.500"
+                  credit_limit: "100000.000"
+                  terms: "prepayment"
+                  currency_id: "550e8400-e29b-41d4-a716-446655440002"
+                  tariff_id: "550e8400-e29b-41d4-a716-446655440001"
+                  relationship_contract_id: "550e8400-e29b-41d4-a716-446655440003"
+                  currency:
+                    id: "550e8400-e29b-41d4-a716-446655440002"
+                    code: "USD"
+                    symbol: "$"
+                    name: "US Dollar"
+                    exchange_rate: "92.5000"
+                    code_number: 840
+                  tariff:
+                    id: "550e8400-e29b-41d4-a716-446655440001"
+                    value: "10.00000"
+                    percentage: "0.50000"
+                    tariff_type: "fixed_and_percentage"
+                    name: "Standard Tariff"
+                    created_at: "2024-01-01T12:00:00Z"
+                    updated_at: "2024-01-15T12:00:00Z"
+                  company:
+                    id: "550e8400-e29b-41d4-a716-446655440004"
+                    full_legal_name: "ООО Импортер-Экспортер"
+                    inn: "7712345678"
+                    short_name: "ИмпЭксп"
+                    type: "buyer"
+                    ogrn: "1057712345678"
+                    okpo: "12345678"
+                    legal_address: "Москва, ул. Ленина, д. 10"
+                    postal_address: "Москва, ул. Ленина, д. 10"
+                    date_registration: "2020-01-15T00:00:00Z"
+                    manager_id: null
+                  relationship_contract:
+                    id: "550e8400-e29b-41d4-a716-446655440003"
+                    number: "REL-2024-0001"
+                    date_signature: "2024-01-10T09:00:00Z"
+                    tariff_id: "550e8400-e29b-41d4-a716-446655440001"
+                    company_id: "550e8400-e29b-41d4-a716-446655440004"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Контракт не найден (в том числе если принадлежит другому партнёру).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Contract not found."
+                entity_id: "550e8400-e29b-41d4-a716-446655440000"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /applications/calculate-deposit:
+    get:
+      tags: [Applications]
+      summary: Предварительный расчёт суммы к перечислению и комиссии
+      operationId: calculateDeposit
+      description: |
+        Рассчитывает сумму к перечислению (`deposit = amount × exchange_rate`) и комиссию
+        (`fee`) по указанным валюте, контракту и сумме. Используется перед созданием заявки,
+        чтобы получить корректные значения `deposit`, `fee` и `exchange_rate`.
+      parameters:
+        - name: currency_code
+          in: query
+          required: true
+          description: Буквенный код валюты по ISO 4217 (3 заглавные латинские буквы).
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          example: "USD"
+        - name: contract_number
+          in: query
+          required: true
+          description: Номер контракта, по которому выполняется расчёт.
+          schema:
+            type: string
+          example: "CNT-2024-0001"
+        - name: amount
+          in: query
+          required: true
+          description: |
+            Сумма в валюте отправителя. Передаётся как десятичное число (`Decimal`).
+          schema:
+            type: number
+            format: decimal
+            minimum: 0.001
+            exclusiveMaximum: 1000000000000
+          example: 1000.50
+      responses:
+        '200':
+          description: Результат расчёта.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SingleDepositDataResponse'
+              example:
+                deposit_data:
+                  deposit: "92546.25"
+                  fee: "512.73"
+                  exchange_rate: "92.5000"
+                  tariff:
+                    id: "550e8400-e29b-41d4-a716-446655440001"
+                    value: "10.00000"
+                    percentage: "0.50000"
+                    tariff_type: "fixed_and_percentage"
+                    name: "Standard Tariff"
+                    created_at: "2024-01-01T12:00:00Z"
+                    updated_at: "2024-01-15T12:00:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Валюта или контракт не найдены.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Contract not found."
+                entity_id: "CNT-2024-0001"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /applications:
+    post:
+      tags: [Applications]
+      summary: Создать заявку
+      operationId: createApplication
+      description: |
+        Создаёт заявку на платёж. Заявка создаётся в статусе `on_inspect` (на проверке).
+        При успешном создании возвращается `200 OK` (HTTP-код успеха не переопределён на
+        стороне сервиса).
+
+        Особенности валидации:
+        - `currency_code` сопоставляется с валютой в системе; курс берётся из справочника.
+        - Должно выполняться `exchange_rate == deposit / amount` (курс из справочника
+          обязан соответствовать переданным `deposit` и `amount`).
+        - Для всех валют, кроме `RUB`, поле `deposit` обязано отличаться от `amount`.
+          Для `RUB` это ограничение не применяется.
+        - `contract_number` сопоставляется с контрактом партнёра.
+
+        После создания заявки документы прикладываются отдельным методом
+        `POST /applications/{application_id}/documents`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplicationRequest'
+            example:
+              invoice_number: "INV-2024-001"
+              payment_name: "Оплата за поставку товара"
+              amount: "1000.00"
+              currency_code: "USD"
+              deposit: "92500.00"
+              fee: "512.73"
+              recipient: "John Smith Ltd."
+              recipient_country: "Netherlands"
+              recipient_city: "Amsterdam"
+              recipient_iban: "NL91ABNA0417164300"
+              recipient_address: "Strawinskylaan 3105, 1077 ZX Amsterdam"
+              bank_swift: "ABNANL2A"
+              bank_name: "ABN AMRO Bank N.V."
+              bank_address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
+              contract_number: "CNT-2024-0001"
+      responses:
+        '200':
+          description: Заявка создана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SingleApplicationResponse'
+              example:
+                application:
+                  id: "770e8400-e29b-41d4-a716-446655440010"
+                  invoice_number: "INV-2024-001"
+                  payment_name: "Оплата за поставку товара"
+                  amount: "1000.00"
+                  currency:
+                    id: "550e8400-e29b-41d4-a716-446655440002"
+                    code: "USD"
+                    symbol: "$"
+                    name: "US Dollar"
+                    exchange_rate: "92.5000"
+                    code_number: 840
+                  exchange_rate: "92.5000"
+                  deposit: "92500.00"
+                  fee: "512.73"
+                  swift_translation_reference: null
+                  status: "on_inspect"
+                  recipient:
+                    recipient: "John Smith Ltd."
+                    country: "Netherlands"
+                    city: "Amsterdam"
+                    iban: "NL91ABNA0417164300"
+                    address: "Strawinskylaan 3105, 1077 ZX Amsterdam"
+                  bank:
+                    swift: "ABNANL2A"
+                    name: "ABN AMRO Bank N.V."
+                    address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
+                  type: "export"
+                  contract_number: "CNT-2024-0001"
+                  application_number: 42
+                  payment_date: null
+                  payment_due_date: null
+                  created_at: "2026-06-29T14:20:30Z"
+                  created_by: null
+        '400':
+          description: |
+            Ошибка бизнес-валидации (например неверный курс обмена или `deposit`,
+            совпадающий с `amount` для не-RUB валюты).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_exchange_rate:
+                  summary: Неверный курс обмена
+                  value:
+                    detail: "Invalid exchange rate"
+                deposit_equals_amount:
+                  summary: deposit совпадает с amount (не-RUB)
+                  value:
+                    detail: "Deposit should be different from amount."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Контракт или валюта не найдены.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Contract not found."
+                entity_id: "CNT-2024-0001"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Applications]
+      summary: Список заявок
+      operationId: listApplications
+      description: |
+        Возвращает постраничный список заявок партнёра. Используется в том числе для
+        отслеживания статусов заявок методом polling. Поддерживает фильтрацию по статусу
+        и по номеру контракта для эффективного отслеживания нужных заявок.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: status
+          in: query
+          required: false
+          description: Фильтр по статусу заявки.
+          schema:
+            $ref: '#/components/schemas/ApplicationStatusEnum'
+          example: "queued_for_payout"
+        - name: contract_number
+          in: query
+          required: false
+          description: Фильтр по номеру контракта заявки.
+          schema:
+            type: string
+          example: "CNT-2024-0001"
+      responses:
+        '200':
+          description: Постраничный список заявок.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluralApplicationResponse'
+              example:
+                applications:
+                  - id: "770e8400-e29b-41d4-a716-446655440010"
+                    invoice_number: "INV-2024-001"
+                    payment_name: "Оплата за поставку товара"
+                    amount: "1000.00"
+                    currency:
+                      id: "550e8400-e29b-41d4-a716-446655440002"
+                      code: "USD"
+                      symbol: "$"
+                      name: "US Dollar"
+                      exchange_rate: "92.5000"
+                      code_number: 840
+                    exchange_rate: "92.5000"
+                    deposit: "92500.00"
+                    fee: "512.73"
+                    swift_translation_reference: "SWIFT123ABC"
+                    status: "queued_for_payout"
+                    recipient:
+                      recipient: "John Smith Ltd."
+                      country: "Netherlands"
+                      city: "Amsterdam"
+                      iban: "NL91ABNA0417164300"
+                      address: "Strawinskylaan 3105, 1077 ZX Amsterdam"
+                    bank:
+                      swift: "ABNANL2A"
+                      name: "ABN AMRO Bank N.V."
+                      address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
+                    type: "export"
+                    contract_number: "CNT-2024-0001"
+                    application_number: 42
+                    payment_date: "2026-06-30T10:00:00Z"
+                    payment_due_date: "2026-07-15T23:59:59Z"
+                    created_at: "2026-06-29T14:20:30Z"
+                    created_by: null
+                total_count: 150
+                next_page_offset: 20
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /applications/{application_id}:
+    get:
+      tags: [Applications]
+      summary: Получить заявку
+      operationId: getApplication
+      description: |
+        Возвращает детальную информацию по одной заявке. Основной метод для polling-опроса
+        статуса конкретной заявки. Если заявка не принадлежит партнёру или не существует —
+        возвращается `404`.
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Заявка найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SingleApplicationResponse'
+              example:
+                application:
+                  id: "770e8400-e29b-41d4-a716-446655440010"
+                  invoice_number: "INV-2024-001"
+                  payment_name: "Оплата за поставку товара"
+                  amount: "1000.00"
+                  currency:
+                    id: "550e8400-e29b-41d4-a716-446655440002"
+                    code: "USD"
+                    symbol: "$"
+                    name: "US Dollar"
+                    exchange_rate: "92.5000"
+                    code_number: 840
+                  exchange_rate: "92.5000"
+                  deposit: "92500.00"
+                  fee: "512.73"
+                  swift_translation_reference: "SWIFT123ABC"
+                  status: "done"
+                  recipient:
+                    recipient: "John Smith Ltd."
+                    country: "Netherlands"
+                    city: "Amsterdam"
+                    iban: "NL91ABNA0417164300"
+                    address: "Strawinskylaan 3105, 1077 ZX Amsterdam"
+                  bank:
+                    swift: "ABNANL2A"
+                    name: "ABN AMRO Bank N.V."
+                    address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
+                  type: "export"
+                  contract_number: "CNT-2024-0001"
+                  application_number: 42
+                  payment_date: "2026-06-30T10:00:00Z"
+                  payment_due_date: "2026-07-15T23:59:59Z"
+                  created_at: "2026-06-29T14:20:30Z"
+                  created_by: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Заявка не найдена (в том числе если принадлежит другому партнёру).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Application not found."
+                entity_id: "770e8400-e29b-41d4-a716-446655440010"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /applications/{application_id}/documents:
+    post:
+      tags: [Applications]
+      summary: Приложить документ к заявке
+      operationId: uploadApplicationDocument
+      description: |
+        Прикладывает документ к ранее созданной заявке. Передаётся как
+        `multipart/form-data`. Порядок работы: сначала создаётся заявка
+        (`POST /applications`), затем к ней прикладываются документы.
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DocumentUploadRequest'
+            encoding:
+              file:
+                contentType: application/octet-stream
+            example:
+              file: "<binary file content>"
+              file_name: "invoice_INV-2024-001.pdf"
+              type: "INVOICE"
+      responses:
+        '201':
+          description: Документ приложен.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+              example:
+                id: "880e8400-e29b-41d4-a716-446655440020"
+                type: "INVOICE"
+                content_type: "application/pdf"
+                file_name: "invoice_INV-2024-001.pdf"
+                url: "https://files.fable.example/documents/880e8400.pdf"
+                s3_key: "applications/770e8400/invoice_INV-2024-001.pdf"
+                created_at: "2026-06-29T14:25:00Z"
+                application_id: "770e8400-e29b-41d4-a716-446655440010"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Заявка не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Application not found."
+                entity_id: "770e8400-e29b-41d4-a716-446655440010"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [Applications]
+      summary: Список документов заявки
+      operationId: listApplicationDocuments
+      description: |
+        Возвращает список документов, приложенных к заявке. Список всегда полный и не
+        пагинируется (количество документов на заявку ограничено по объёму).
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: Список документов заявки (полный, без пагинации).
+          content:
+            application/json:
+              schema:
+                type: array
+                description: Полный массив документов заявки.
+                items:
+                  $ref: '#/components/schemas/Document'
+              example:
+                - id: "880e8400-e29b-41d4-a716-446655440020"
+                  type: "INVOICE"
+                  content_type: "application/pdf"
+                  file_name: "invoice_INV-2024-001.pdf"
+                  url: "https://files.fable.example/documents/880e8400.pdf"
+                  s3_key: "applications/770e8400/invoice_INV-2024-001.pdf"
+                  created_at: "2026-06-29T14:25:00Z"
+                  application_id: "770e8400-e29b-41d4-a716-446655440010"
+                - id: "990e8400-e29b-41d4-a716-446655440021"
+                  type: "DEAL_CONTRACT"
+                  content_type: "application/pdf"
+                  file_name: "contract_CNT-2024-0001.pdf"
+                  url: "https://files.fable.example/documents/990e8400.pdf"
+                  s3_key: "applications/770e8400/contract_CNT-2024-0001.pdf"
+                  created_at: "2026-06-29T14:26:00Z"
+                  application_id: "770e8400-e29b-41d4-a716-446655440010"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Заявка не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Application not found."
+                entity_id: "770e8400-e29b-41d4-a716-446655440010"
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /applications/{application_id}/act:
+    get:
+      tags: [Applications]
+      summary: Скачать акт по заявке (PDF)
+      operationId: getApplicationAct
+      description: |
+        Возвращает акт по заявке в формате PDF (потоковая отдача файла,
+        `Content-Disposition: attachment`). Кэширование отключено.
+
+        Тело успешного ответа — бинарный поток PDF, поэтому `example` для него не приводится
+        (неприменимо к бинарным данным).
+
+        Акт доступен только когда заявка достигла соответствующего статуса. Если заявка
+        ещё не в нужном статусе — возвращается `409 Conflict`.
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '200':
+          description: PDF-файл акта (бинарный поток; example неприменим).
+          headers:
+            Content-Disposition:
+              description: Имя файла вложения.
+              schema:
+                type: string
+              example: "attachment; filename=act_report_770e8400-e29b-41d4-a716-446655440010.pdf"
+            Cache-Control:
+              description: Запрет кэширования.
+              schema:
+                type: string
+              example: "no-cache, no-store, must-revalidate"
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Заявка не найдена (в том числе если принадлежит другому партнёру).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Application not found."
+                entity_id: "770e8400-e29b-41d4-a716-446655440010"
+        '409':
+          description: Заявка ещё не в статусе, при котором доступен акт.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Act report is not available for the current application status."
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Bearer-токен (JWT), полученный через `POST /auth/token`. Передаётся в заголовке
+        `Authorization: Bearer <access_token>`.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Размер страницы (количество записей). По умолчанию 20, максимум 50.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 20
+      example: 20
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Смещение от начала выборки. По умолчанию 0, максимум 1000.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 1000
+        default: 0
+      example: 0
+    ApplicationId:
+      name: application_id
+      in: path
+      required: true
+      description: Идентификатор заявки.
+      schema:
+        type: string
+        format: uuid
+      example: "770e8400-e29b-41d4-a716-446655440010"
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Bad request."
+    Unauthorized:
+      description: Отсутствует, недействителен или истёк bearer-токен.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_token:
+              summary: Недействительный токен
+              value:
+                detail: "Invalid token."
+            token_expired:
+              summary: Истёкший токен
+              value:
+                detail: "Token expired."
+            invalid_token_type:
+              summary: Неверный тип токена
+              value:
+                detail: "Invalid token type."
+    TooManyRequests:
+      description: |
+        Превышено ограничение частоты запросов (rate limit). Следует уменьшить частоту
+        опроса и повторить запрос позднее.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Too many requests. Please retry later."
+    ValidationError:
+      description: Ошибка валидации тела запроса или параметров (Pydantic).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+          example:
+            detail:
+              - loc: ["body", "amount"]
+                msg: "ensure this value is greater than or equal to 0.001"
+    InternalError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Internal server error."
+
+  schemas:
+
+    TokenRequest:
+      type: object
+      description: Запрос на получение токенов (OAuth2 client_credentials).
+      required: [grant_type, client_id, client_secret]
+      properties:
+        grant_type:
+          type: string
+          enum: [client_credentials]
+          description: Тип гранта. Для этого метода — всегда `client_credentials`.
+          example: "client_credentials"
+        client_id:
+          type: string
+          description: Идентификатор клиента партнёра.
+          example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        client_secret:
+          type: string
+          description: Секрет клиента партнёра.
+          example: "s3cr3t_K9xQzv7Lp2mWnR4tYbHdFa"
+
+    TokenRefreshRequest:
+      type: object
+      description: Запрос на обновление токенов (OAuth2 refresh_token).
+      required: [grant_type, refresh_token]
+      properties:
+        grant_type:
+          type: string
+          enum: [refresh_token]
+          description: Тип гранта. Для этого метода — всегда `refresh_token`.
+          example: "refresh_token"
+        refresh_token:
+          type: string
+          description: Действующий refresh-токен, полученный ранее.
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiUkVGUkVTSCJ9.bbb"
+        client_id:
+          type: string
+          description: Идентификатор клиента партнёра.
+          example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
+    TokenResponse:
+      type: object
+      description: Пара токенов OAuth2.
+      required: [access_token, token_type, expires_in, refresh_token, refresh_expires_in]
+      properties:
+        access_token:
+          type: string
+          description: JWT access-токен для авторизации запросов.
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGllbnQifQ.aaa"
+        token_type:
+          type: string
+          description: Тип токена. Всегда `Bearer`.
+          example: "Bearer"
+        expires_in:
+          type: integer
+          description: Срок жизни access-токена в секундах (14400 = 4 часа).
+          example: 14400
+        refresh_token:
+          type: string
+          description: JWT refresh-токен для обновления пары без повторной аутентификации.
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiUkVGUkVTSCJ9.bbb"
+        refresh_expires_in:
+          type: integer
+          description: Срок жизни refresh-токена в секундах (172800 = 2 дня).
+          example: 172800
+
+    Currency:
+      type: object
+      description: Валюта справочника.
+      required: [id, code, symbol, name, exchange_rate]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор валюты.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        code:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: Буквенный код валюты (ISO 4217, 3 заглавные латинские буквы).
+          example: "USD"
+        symbol:
+          type: string
+          description: Символ валюты.
+          example: "$"
+        name:
+          type: string
+          description: Полное наименование валюты.
+          example: "US Dollar"
+        exchange_rate:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Курс обмена к базовой валюте (десятичное число строкой, 4 знака после запятой).
+          example: "92.5000"
+        code_number:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 999
+          description: Числовой код валюты (ISO 4217, диапазон 0..999).
+          example: 840
+
+    SingleCurrencyResponse:
+      type: object
+      description: Ответ с одной валютой.
+      required: [currency]
+      properties:
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    PluralCurrencyResponse:
+      type: object
+      description: Постраничный список валют.
+      required: [currencies, total_count]
+      properties:
+        currencies:
+          type: array
+          description: Массив валют на текущей странице.
+          items:
+            $ref: '#/components/schemas/Currency'
+        total_count:
+          type: integer
+          description: Общее количество валют без учёта пагинации.
+          example: 15
+        next_page_offset:
+          type: [integer, "null"]
+          description: Смещение для следующей страницы или `null`, если данных больше нет.
+          example: 20
+
+    Tariff:
+      type: object
+      description: Тариф (параметры комиссии).
+      required: [id, tariff_type, name, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор тарифа.
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        value:
+          type: [string, "null"]
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Фиксированная сумма комиссии (десятичное число строкой, 5 знаков после запятой).
+          example: "10.00000"
+        percentage:
+          type: [string, "null"]
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Процент комиссии (десятичное число строкой, 5 знаков после запятой).
+          example: "0.50000"
+        tariff_type:
+          $ref: '#/components/schemas/TariffTypeEnum'
+        name:
+          type: string
+          description: Наименование тарифа.
+          example: "Standard Tariff"
+        created_at:
+          type: string
+          format: date-time
+          description: Дата и время создания тарифа.
+          example: "2024-01-01T12:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Дата и время последнего обновления тарифа.
+          example: "2024-01-15T12:00:00Z"
+
+    TariffTypeEnum:
+      type: string
+      description: |
+        Тип тарифа:
+        - `percentage` — только процент;
+        - `fixed` — только фиксированная сумма;
+        - `fixed_and_percentage` — фиксированная сумма плюс процент.
+      enum: [percentage, fixed, fixed_and_percentage]
+      example: "fixed_and_percentage"
+
+    CompanyTypeEnum:
+      type: string
+      description: |
+        Тип (роль) компании в сделке:
+        - `buyer` — покупатель;
+        - `seller` — продавец.
+      enum: [buyer, seller]
+      example: "buyer"
+
+    Company:
+      type: object
+      description: Компания (контрагент контракта).
+      required: [id, full_legal_name, inn, short_name, type]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор компании.
+          example: "550e8400-e29b-41d4-a716-446655440004"
+        full_legal_name:
+          type: string
+          description: Полное юридическое наименование.
+          example: "ООО Импортер-Экспортер"
+        inn:
+          type: string
+          description: ИНН компании.
+          example: "7712345678"
+        short_name:
+          type: string
+          description: Краткое наименование (обязательное, не nullable).
+          example: "ИмпЭксп"
+        type:
+          $ref: '#/components/schemas/CompanyTypeEnum'
+        ogrn:
+          type: [string, "null"]
+          description: ОГРН.
+          example: "1057712345678"
+        okpo:
+          type: [string, "null"]
+          description: ОКПО.
+          example: "12345678"
+        legal_address:
+          type: [string, "null"]
+          description: Юридический адрес.
+          example: "Москва, ул. Ленина, д. 10"
+        postal_address:
+          type: [string, "null"]
+          description: Почтовый адрес.
+          example: "Москва, ул. Ленина, д. 10"
+        date_registration:
+          type: [string, "null"]
+          format: date-time
+          description: Дата регистрации компании.
+          example: "2020-01-15T00:00:00Z"
+        manager_id:
+          type: [string, "null"]
+          format: uuid
+          description: Идентификатор менеджера.
+          example: null
+
+    RelationshipContract:
+      type: object
+      description: Договор об отношениях (рамочный партнёрский договор).
+      required: [id, company_id]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор договора об отношениях.
+          example: "550e8400-e29b-41d4-a716-446655440003"
+        number:
+          type: [string, "null"]
+          description: Номер договора об отношениях.
+          example: "REL-2024-0001"
+        date_signature:
+          type: [string, "null"]
+          format: date-time
+          description: Дата подписания.
+          example: "2024-01-10T09:00:00Z"
+        tariff_id:
+          type: [string, "null"]
+          format: uuid
+          description: Идентификатор тарифа договора.
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        company_id:
+          type: string
+          format: uuid
+          description: Идентификатор компании.
+          example: "550e8400-e29b-41d4-a716-446655440004"
+
+    ContractTypeEnum:
+      type: string
+      description: |
+        Тип контракта:
+        - `export` — экспорт (продажа за границу);
+        - `import` — импорт (закупка из-за границы);
+        - `transit` — транзит (промежуточный).
+      enum: [export, import, transit]
+      example: "export"
+
+    TermsOfDealContractEnum:
+      type: string
+      description: |
+        Условия платежа по контракту:
+        - `prepayment` — авансовый платёж (до поставки);
+        - `postpayment` — платёж после поставки.
+      enum: [prepayment, postpayment]
+      example: "prepayment"
+
+    Contract:
+      type: object
+      description: Контракт партнёра (без внутренних полей).
+      required: [id, number, type, currency, tariff, company]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор контракта.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        number:
+          type: string
+          description: Номер контракта.
+          example: "CNT-2024-0001"
+        type:
+          $ref: '#/components/schemas/ContractTypeEnum'
+        date_signature:
+          type: [string, "null"]
+          format: date-time
+          description: Дата подписания контракта.
+          example: "2024-01-15T10:30:00Z"
+        delivery_time:
+          type: [string, "null"]
+          format: date-time
+          description: Срок поставки.
+          example: "2024-02-15T23:59:59Z"
+        amount:
+          type: [string, "null"]
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Сумма контракта (десятичное число строкой, 3 знака после запятой).
+          example: "50000.500"
+        credit_limit:
+          type: [string, "null"]
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Кредитный лимит (десятичное число строкой, 3 знака после запятой).
+          example: "100000.000"
+        terms:
+          oneOf:
+            - $ref: '#/components/schemas/TermsOfDealContractEnum'
+            - type: "null"
+          description: Условия платежа по контракту или `null`.
+        currency_id:
+          type: [string, "null"]
+          format: uuid
+          description: Идентификатор валюты контракта или `null`.
+          example: "550e8400-e29b-41d4-a716-446655440002"
+        tariff_id:
+          type: [string, "null"]
+          format: uuid
+          description: Идентификатор тарифа контракта или `null`.
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        relationship_contract_id:
+          type: [string, "null"]
+          format: uuid
+          description: Идентификатор договора об отношениях.
+          example: "550e8400-e29b-41d4-a716-446655440003"
+        currency:
+          $ref: '#/components/schemas/Currency'
+        tariff:
+          $ref: '#/components/schemas/Tariff'
+        company:
+          $ref: '#/components/schemas/Company'
+        relationship_contract:
+          oneOf:
+            - $ref: '#/components/schemas/RelationshipContract'
+            - type: "null"
+          description: Договор об отношениях или `null`.
+
+    SingleContractResponse:
+      type: object
+      description: Ответ с одним контрактом.
+      required: [deal_contract]
+      properties:
+        deal_contract:
+          $ref: '#/components/schemas/Contract'
+
+    PluralContractResponse:
+      type: object
+      description: Постраничный список контрактов.
+      required: [deal_contracts, total_count]
+      properties:
+        deal_contracts:
+          type: array
+          description: Массив контрактов на текущей странице.
+          items:
+            $ref: '#/components/schemas/Contract'
+        total_count:
+          type: integer
+          description: Общее количество контрактов без учёта пагинации.
+          example: 150
+        next_page_offset:
+          type: [integer, "null"]
+          description: Смещение для следующей страницы или `null`, если данных больше нет.
+          example: 20
+
+    DepositData:
+      type: object
+      description: Результат предварительного расчёта суммы к перечислению и комиссии.
+      required: [deposit, fee, exchange_rate, tariff]
+      properties:
+        deposit:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Рассчитанная сумма к перечислению (`amount × exchange_rate`), десятичное число строкой.
+          example: "92546.25"
+        fee:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Рассчитанная комиссия на основе тарифа (десятичное число строкой).
+          example: "512.73"
+        exchange_rate:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Курс обмена валюты (десятичное число строкой).
+          example: "92.5000"
+        tariff:
+          $ref: '#/components/schemas/Tariff'
+
+    SingleDepositDataResponse:
+      type: object
+      description: Ответ с результатом расчёта.
+      required: [deposit_data]
+      properties:
+        deposit_data:
+          $ref: '#/components/schemas/DepositData'
+
+    ApplicationRequest:
+      type: object
+      description: |
+        Запрос на создание заявки. `exchange_rate` не передаётся — он берётся из справочника
+        по `currency_code` и валидируется: `exchange_rate == deposit / amount`.
+        Для всех валют кроме `RUB` поле `deposit` обязано отличаться от `amount`.
+
+        Поле `recipient_address` обязательно на входе. На выходе соответствующее поле
+        `Recipient.address` также обязательно и не nullable — модели входа и выхода
+        согласованы.
+      required:
+        - invoice_number
+        - payment_name
+        - amount
+        - currency_code
+        - deposit
+        - fee
+        - recipient
+        - recipient_country
+        - recipient_city
+        - recipient_iban
+        - recipient_address
+        - bank_swift
+        - bank_name
+        - bank_address
+        - contract_number
+      properties:
+        invoice_number:
+          type: string
+          description: Номер счёта-фактуры.
+          example: "INV-2024-001"
+        payment_name:
+          type: string
+          description: Название (назначение) платежа.
+          example: "Оплата за поставку товара"
+        amount:
+          type: string
+          format: decimal
+          pattern: '^\d+(\.\d+)?$'
+          description: Сумма в валюте отправителя (десятичное число строкой; >= 0.001, < 1e12, до 15 знаков после запятой).
+          example: "1000.00"
+        currency_code:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          minLength: 3
+          maxLength: 3
+          description: Код валюты ISO 4217 (ровно 3 заглавные латинские буквы).
+          example: "USD"
+        deposit:
+          type: string
+          format: decimal
+          pattern: '^\d+(\.\d+)?$'
+          description: |
+            Сумма к перечислению (десятичное число строкой; >= 0.001, < 1e12, до 15 знаков после запятой).
+            Должна равняться `amount × exchange_rate`. Для не-RUB валют обязана отличаться от `amount`.
+          example: "92500.00"
+        fee:
+          type: string
+          format: decimal
+          pattern: '^\d+(\.\d+)?$'
+          description: Комиссия (десятичное число строкой; >= 0.001, < 1e7, до 10 знаков после запятой).
+          example: "512.73"
+        recipient:
+          type: string
+          description: ФИО / наименование получателя.
+          example: "John Smith Ltd."
+        recipient_country:
+          type: string
+          description: Страна получателя.
+          example: "Netherlands"
+        recipient_city:
+          type: string
+          description: Город получателя.
+          example: "Amsterdam"
+        recipient_iban:
+          type: string
+          description: |
+            IBAN счёта получателя. Строгая валидация формата IBAN выполняется на стороне
+            сервера; в спецификации формат не ограничивается `pattern`.
+          example: "NL91ABNA0417164300"
+        recipient_address:
+          type: string
+          description: Адрес получателя (обязательный).
+          example: "Strawinskylaan 3105, 1077 ZX Amsterdam"
+        bank_swift:
+          type: string
+          pattern: '^[A-Z0-9]{8}([A-Z0-9]{3})?$'
+          description: SWIFT/BIC-код банка получателя (8 или 11 символов).
+          example: "ABNANL2A"
+        bank_name:
+          type: string
+          description: Наименование банка получателя.
+          example: "ABN AMRO Bank N.V."
+        bank_address:
+          type: string
+          description: Адрес банка получателя.
+          example: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
+        contract_number:
+          type: string
+          description: Номер контракта, по которому создаётся заявка.
+          example: "CNT-2024-0001"
+
+    Recipient:
+      type: object
+      description: Данные получателя платежа.
+      required: [recipient, country, city, iban, address]
+      properties:
+        recipient:
+          type: string
+          description: ФИО / наименование получателя.
+          example: "John Smith Ltd."
+        country:
+          type: string
+          description: Страна получателя.
+          example: "Netherlands"
+        city:
+          type: string
+          description: Город получателя.
+          example: "Amsterdam"
+        iban:
+          type: string
+          description: |
+            IBAN счёта получателя. Валидация формата выполняется на стороне сервера.
+          example: "NL91ABNA0417164300"
+        address:
+          type: string
+          description: |
+            Адрес получателя. Обязательное, не nullable — согласовано с обязательным
+            `recipient_address` во входной модели `ApplicationRequest`.
+          example: "Strawinskylaan 3105, 1077 ZX Amsterdam"
+
+    Bank:
+      type: object
+      description: Данные банка получателя.
+      required: [swift, name, address]
+      properties:
+        swift:
+          type: string
+          pattern: '^[A-Z0-9]{8}([A-Z0-9]{3})?$'
+          description: SWIFT/BIC-код банка (8 или 11 символов).
+          example: "ABNANL2A"
+        name:
+          type: string
+          description: Наименование банка.
+          example: "ABN AMRO Bank N.V."
+        address:
+          type: string
+          description: Адрес банка.
+          example: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
+
+    ApplicationStatusEnum:
+      type: string
+      description: |
+        Статус заявки:
+        - `on_inspect` — на проверке (начальный статус после создания);
+        - `confirmation` — требует подтверждения;
+        - `queued_for_payout` — в очереди на выплату;
+        - `payout` — выплачивается;
+        - `done` — завершено;
+        - `rejected` — отклонено.
+      enum: [on_inspect, confirmation, queued_for_payout, payout, done, rejected]
+      example: "on_inspect"
+
+    Application:
+      type: object
+      description: Заявка на платёж.
+      required:
+        - id
+        - invoice_number
+        - payment_name
+        - amount
+        - currency
+        - exchange_rate
+        - deposit
+        - fee
+        - status
+        - recipient
+        - bank
+        - type
+        - application_number
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор заявки.
+          example: "770e8400-e29b-41d4-a716-446655440010"
+        invoice_number:
+          type: string
+          description: Номер счёта-фактуры.
+          example: "INV-2024-001"
+        payment_name:
+          type: string
+          description: Назначение платежа.
+          example: "Оплата за поставку товара"
+        amount:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Сумма платежа в валюте отправителя (десятичное число строкой).
+          example: "1000.00"
+        currency:
+          $ref: '#/components/schemas/Currency'
+        exchange_rate:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Курс обмена, применённый к заявке (десятичное число строкой).
+          example: "92.5000"
+        deposit:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Сумма к перечислению (десятичное число строкой).
+          example: "92500.00"
+        fee:
+          type: string
+          format: decimal
+          pattern: '^-?\d+(\.\d+)?$'
+          description: Комиссия (десятичное число строкой).
+          example: "512.73"
+        swift_translation_reference:
+          type: [string, "null"]
+          description: Референс SWIFT-перевода (заполняется по мере обработки).
+          example: "SWIFT123ABC"
+        status:
+          $ref: '#/components/schemas/ApplicationStatusEnum'
+        recipient:
+          $ref: '#/components/schemas/Recipient'
+        bank:
+          $ref: '#/components/schemas/Bank'
+        type:
+          $ref: '#/components/schemas/ContractTypeEnum'
+        contract_number:
+          type: [string, "null"]
+          description: Номер контракта заявки.
+          example: "CNT-2024-0001"
+        application_number:
+          type: integer
+          description: Порядковый номер заявки.
+          example: 42
+        payment_date:
+          type: [string, "null"]
+          format: date-time
+          description: Дата платежа.
+          example: "2026-06-30T10:00:00Z"
+        payment_due_date:
+          type: [string, "null"]
+          format: date-time
+          description: Срок платежа.
+          example: "2026-07-15T23:59:59Z"
+        created_at:
+          type: string
+          format: date-time
+          description: Дата и время создания заявки.
+          example: "2026-06-29T14:20:30Z"
+        created_by:
+          type: [string, "null"]
+          description: |
+            Пользователь, создавший заявку. Для заявок, созданных партнёром через API,
+            значение обычно `null` (заявка создана интеграцией, а не конкретным
+            пользователем). Если заполнено — содержит идентификатор/имя оператора.
+          example: null
+
+    SingleApplicationResponse:
+      type: object
+      description: Ответ с одной заявкой.
+      required: [application]
+      properties:
+        application:
+          $ref: '#/components/schemas/Application'
+
+    PluralApplicationResponse:
+      type: object
+      description: Постраничный список заявок.
+      required: [applications, total_count]
+      properties:
+        applications:
+          type: array
+          description: Массив заявок на текущей странице.
+          items:
+            $ref: '#/components/schemas/Application'
+        total_count:
+          type: integer
+          description: Общее количество заявок без учёта пагинации.
+          example: 150
+        next_page_offset:
+          type: [integer, "null"]
+          description: Смещение для следующей страницы или `null`, если данных больше нет.
+          example: 20
+
+    DocumentTypeEnum:
+      type: string
+      description: |
+        Тип документа (значения в верхнем регистре). Расшифровка значений:
+        - `SWIFT` — SWIFT-сообщение/подтверждение перевода;
+        - `ACT_REPORT` — акт (отчёт) по заявке;
+        - `PAYMENT_EXECUTION` — подтверждение исполнения платежа;
+        - `PAYMENT_ORDER` — платёжное поручение;
+        - `VBK` — ведомость банковского контроля;
+        - `RELATIONSHIP_CONTRACT` — рамочный договор об отношениях;
+        - `DEAL_CONTRACT` — контракт сделки;
+        - `IMPORT_APPLICATION` — заявление на импорт;
+        - `EXPORT_APPLICATION` — заявление на экспорт;
+        - `INVOICE` — счёт-фактура (инвойс);
+        - `SPECIFICATION` — спецификация;
+        - `ATTACHMENT` — произвольное вложение;
+        - `PACKING_LIST` — упаковочный лист;
+        - `CUSTOMS_DECLARATION` — таможенная декларация;
+        - `AIR_WAYBILL` — авианакладная;
+        - `PERFORMANCE_BOND` — гарантия исполнения обязательств;
+        - `AGENCY_AGREEMENT` — агентский договор;
+        - `COMPANY_CARD` — карточка компании;
+        - `FOREIGN_TRADE_CONTRACT` — внешнеторговый контракт.
+      enum:
+        - SWIFT
+        - ACT_REPORT
+        - PAYMENT_EXECUTION
+        - PAYMENT_ORDER
+        - VBK
+        - RELATIONSHIP_CONTRACT
+        - DEAL_CONTRACT
+        - IMPORT_APPLICATION
+        - EXPORT_APPLICATION
+        - INVOICE
+        - SPECIFICATION
+        - ATTACHMENT
+        - PACKING_LIST
+        - CUSTOMS_DECLARATION
+        - AIR_WAYBILL
+        - PERFORMANCE_BOND
+        - AGENCY_AGREEMENT
+        - COMPANY_CARD
+        - FOREIGN_TRADE_CONTRACT
+      example: "INVOICE"
+
+    DocumentUploadRequest:
+      type: object
+      description: |
+        Multipart-форма для приложения документа к заявке. Поле `file` — бинарное содержимое,
+        примеру не подлежит; пример значений полей формы (`file_name`, `type`) приведён на
+        уровне `requestBody`.
+      required: [file, file_name, type]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Бинарное содержимое файла документа (примеру не подлежит).
+        file_name:
+          type: string
+          description: Имя файла.
+          example: "invoice_INV-2024-001.pdf"
+        type:
+          $ref: '#/components/schemas/DocumentTypeEnum'
+
+    Document:
+      type: object
+      description: Документ заявки.
+      required: [id, type, file_name, s3_key, created_at, application_id]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Уникальный идентификатор документа.
+          example: "880e8400-e29b-41d4-a716-446655440020"
+        type:
+          $ref: '#/components/schemas/DocumentTypeEnum'
+        content_type:
+          type: [string, "null"]
+          description: MIME-тип файла.
+          example: "application/pdf"
+        file_name:
+          type: string
+          description: Имя файла.
+          example: "invoice_INV-2024-001.pdf"
+        url:
+          type: [string, "null"]
+          description: URL для скачивания (может отсутствовать).
+          example: "https://files.fable.example/documents/880e8400.pdf"
+        s3_key:
+          type: string
+          description: Ключ объекта в хранилище S3.
+          example: "applications/770e8400/invoice_INV-2024-001.pdf"
+        created_at:
+          type: string
+          format: date-time
+          description: Дата и время создания документа.
+          example: "2026-06-29T14:25:00Z"
+        application_id:
+          type: string
+          format: uuid
+          description: Идентификатор заявки, к которой привязан документ.
+          example: "770e8400-e29b-41d4-a716-446655440010"
+
+    Error:
+      type: object
+      description: Стандартная ошибка. Может содержать дополнительные поля в зависимости от типа ошибки.
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          description: Текстовое описание ошибки.
+          example: "Application not found."
+        entity_id:
+          type: string
+          description: Идентификатор объекта (для ошибок «не найдено»).
+          example: "770e8400-e29b-41d4-a716-446655440010"
+        fk_name:
+          type: string
+          description: Имя внешнего ключа (для ошибок нарушения FK).
+          example: "applications_contract_id_fkey"
+        table_name:
+          type: string
+          description: Имя таблицы (для ошибок нарушения FK).
+          example: "applications"
+        constraint_name:
+          type: string
+          description: Имя ограничения (для ошибок уникальности).
+          example: "applications_invoice_number_key"
+
+    ValidationError:
+      type: object
+      description: Ошибка валидации (Pydantic) с детализацией по полям.
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          description: Список ошибок валидации.
+          items:
+            type: object
+            description: Одна ошибка валидации — местоположение поля (`loc`) и сообщение (`msg`).
+            required: [loc, msg]
+            properties:
+              loc:
+                type: array
+                description: |
+                  Путь к полю с ошибкой. Элементы могут быть строками (имена полей/секций,
+                  например `"body"`, `"amount"`) либо целыми числами (индексы в массивах).
+                items:
+                  oneOf:
+                    - type: string
+                      description: Имя поля или секции (например `body`, `amount`).
+                      example: "amount"
+                    - type: integer
+                      description: Индекс элемента в массиве.
+                      example: 0
+                example: ["body", "amount"]
+              msg:
+                type: string
+                description: Сообщение об ошибке.
+                example: "ensure this value is greater than or equal to 0.001"
+            example:
+              loc: ["body", "amount"]
+              msg: "ensure this value is greater than or equal to 0.001"
