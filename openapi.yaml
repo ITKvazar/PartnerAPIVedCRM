@@ -631,7 +631,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          description: Валюта или контракт не найдены.
+          description: Валюта или контракт не найдены (контракт не существует или принадлежит другому партнёру).
           content:
             application/json:
               schema:
@@ -751,7 +751,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          description: Контракт или валюта не найдены.
+          description: Контракт или валюта не найдены (контракт не существует или принадлежит другому партнёру).
           content:
             application/json:
               schema:
@@ -980,7 +980,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          description: Заявка не найдена.
+          description: Заявка не найдена (не существует или принадлежит другому партнёру).
           content:
             application/json:
               schema:
@@ -998,41 +998,42 @@ paths:
       summary: Список документов заявки
       operationId: listApplicationDocuments
       description: |
-        Возвращает список документов, приложенных к заявке. Список всегда полный и не
-        пагинируется (количество документов на заявку ограничено по объёму).
+        Возвращает список документов, приложенных к заявке, в виде объекта
+        `{ documents, total_count, next_page_offset }` — единообразно с остальными
+        списочными методами.
       parameters:
         - $ref: '#/components/parameters/ApplicationId'
       responses:
         '200':
-          description: Список документов заявки (полный, без пагинации).
+          description: Список документов заявки.
           content:
             application/json:
               schema:
-                type: array
-                description: Полный массив документов заявки.
-                items:
-                  $ref: '#/components/schemas/Document'
+                $ref: '#/components/schemas/PluralDocumentResponse'
               example:
-                - id: "880e8400-e29b-41d4-a716-446655440020"
-                  type: "INVOICE"
-                  content_type: "application/pdf"
-                  file_name: "invoice_INV-2024-001.pdf"
-                  url: "https://files.vedcrm.example/documents/880e8400.pdf"
-                  created_at: "2026-06-29T14:25:00Z"
-                  application_id: "770e8400-e29b-41d4-a716-446655440010"
-                - id: "990e8400-e29b-41d4-a716-446655440021"
-                  type: "DEAL_CONTRACT"
-                  content_type: "application/pdf"
-                  file_name: "contract_CNT-2024-0001.pdf"
-                  url: "https://files.vedcrm.example/documents/990e8400.pdf"
-                  created_at: "2026-06-29T14:26:00Z"
-                  application_id: "770e8400-e29b-41d4-a716-446655440010"
+                documents:
+                  - id: "880e8400-e29b-41d4-a716-446655440020"
+                    type: "INVOICE"
+                    content_type: "application/pdf"
+                    file_name: "invoice_INV-2024-001.pdf"
+                    url: "https://files.vedcrm.example/documents/880e8400.pdf"
+                    created_at: "2026-06-29T14:25:00Z"
+                    application_id: "770e8400-e29b-41d4-a716-446655440010"
+                  - id: "990e8400-e29b-41d4-a716-446655440021"
+                    type: "DEAL_CONTRACT"
+                    content_type: "application/pdf"
+                    file_name: "contract_CNT-2024-0001.pdf"
+                    url: "https://files.vedcrm.example/documents/990e8400.pdf"
+                    created_at: "2026-06-29T14:26:00Z"
+                    application_id: "770e8400-e29b-41d4-a716-446655440010"
+                total_count: 2
+                next_page_offset: null
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          description: Заявка не найдена.
+          description: Заявка не найдена (не существует или принадлежит другому партнёру).
           content:
             application/json:
               schema:
@@ -1305,7 +1306,9 @@ components:
           type: string
           format: decimal
           pattern: '^-?\d+(\.\d+)?$'
-          description: Курс обмена к базовой валюте (десятичное число строкой, 4 знака после запятой).
+          description: |
+            Текущий курс обмена к базовой валюте на момент запроса (десятичное число строкой,
+            4 знака после запятой). Исторические курсы через API не отдаются.
           example: "92.5000"
         code_number:
           type: [integer, "null"]
@@ -1891,12 +1894,16 @@ components:
         payment_date:
           type: [string, "null"]
           format: date-time
-          description: Дата платежа.
+          description: |
+            Фактическая дата платежа. Проставляется системой при переводе заявки в статус
+            `done`. До этого — `null`.
           example: "2026-06-30T10:00:00Z"
         payment_due_date:
           type: [string, "null"]
           format: date-time
-          description: Срок платежа.
+          description: |
+            Плановая (ожидаемая) дата платежа. Проставляется в процессе обработки заявки
+            менеджером. Информационное поле для партнёра.
           example: "2026-07-15T23:59:59Z"
         created_at:
           type: string
@@ -2036,6 +2043,25 @@ components:
           format: uuid
           description: Идентификатор заявки, к которой привязан документ.
           example: "770e8400-e29b-41d4-a716-446655440010"
+
+    PluralDocumentResponse:
+      type: object
+      description: Список документов заявки.
+      required: [documents, total_count]
+      properties:
+        documents:
+          type: array
+          description: Массив документов заявки.
+          items:
+            $ref: '#/components/schemas/Document'
+        total_count:
+          type: integer
+          description: Общее количество документов заявки.
+          example: 2
+        next_page_offset:
+          type: [integer, "null"]
+          description: Смещение для следующей страницы или `null`, если данных больше нет.
+          example: null
 
     Error:
       type: object
