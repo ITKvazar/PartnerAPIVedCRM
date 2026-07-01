@@ -1,13 +1,13 @@
 openapi: 3.1.0
 
 info:
-  title: Fable Partner API
+  title: VedCRM Partner API
   version: 1.0.0
   description: |
-    Партнёрское API сервиса **Fable** для интеграции по ключам.
+    Партнёрское API сервиса **VedCRM** для интеграции по ключам.
 
     ## Назначение
-    API предназначено для внешних партнёров, которые интегрируются с платформой Fable
+    API предназначено для внешних партнёров, которые интегрируются с платформой VedCRM
     для работы со справочником валют, контрактами и заявками на трансграничные платежи
     (международные переводы по экспортным/импортным/транзитным контрактам).
 
@@ -71,15 +71,15 @@ info:
       enum-схемы (`example` внутри схемы перечисления). Это считается достаточным
       для требования «у каждого поля есть example».
   contact:
-    name: Fable Integration Support
-    email: integration@fable.example
+    name: VedCRM Integration Support
+    email: integration@vedcrm.example
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
 
 servers:
-  - url: https://{environment}.fable.example/v1
-    description: Базовый URL Fable Partner API. Хост зависит от окружения.
+  - url: https://{environment}.vedcrm.example/v1
+    description: Базовый URL VedCRM Partner API. Хост зависит от окружения.
     variables:
       environment:
         default: api
@@ -934,7 +934,7 @@ paths:
                 type: "INVOICE"
                 content_type: "application/pdf"
                 file_name: "invoice_INV-2024-001.pdf"
-                url: "https://files.fable.example/documents/880e8400.pdf"
+                url: "https://files.vedcrm.example/documents/880e8400.pdf"
                 s3_key: "applications/770e8400/invoice_INV-2024-001.pdf"
                 created_at: "2026-06-29T14:25:00Z"
                 application_id: "770e8400-e29b-41d4-a716-446655440010"
@@ -980,7 +980,7 @@ paths:
                   type: "INVOICE"
                   content_type: "application/pdf"
                   file_name: "invoice_INV-2024-001.pdf"
-                  url: "https://files.fable.example/documents/880e8400.pdf"
+                  url: "https://files.vedcrm.example/documents/880e8400.pdf"
                   s3_key: "applications/770e8400/invoice_INV-2024-001.pdf"
                   created_at: "2026-06-29T14:25:00Z"
                   application_id: "770e8400-e29b-41d4-a716-446655440010"
@@ -988,7 +988,7 @@ paths:
                   type: "DEAL_CONTRACT"
                   content_type: "application/pdf"
                   file_name: "contract_CNT-2024-0001.pdf"
-                  url: "https://files.fable.example/documents/990e8400.pdf"
+                  url: "https://files.vedcrm.example/documents/990e8400.pdf"
                   s3_key: "applications/770e8400/contract_CNT-2024-0001.pdf"
                   created_at: "2026-06-29T14:26:00Z"
                   application_id: "770e8400-e29b-41d4-a716-446655440010"
@@ -1968,7 +1968,7 @@ components:
         url:
           type: [string, "null"]
           description: URL для скачивания (может отсутствовать).
-          example: "https://files.fable.example/documents/880e8400.pdf"
+          example: "https://files.vedcrm.example/documents/880e8400.pdf"
         s3_key:
           type: string
           description: Ключ объекта в хранилище S3.
