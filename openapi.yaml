@@ -77,13 +77,6 @@ info:
     - Для свойств, ссылающихся на enum-схемы через `$ref`, пример берётся из самой
       enum-схемы (`example` внутри схемы перечисления). Это считается достаточным
       для требования «у каждого поля есть example».
-  contact:
-    name: VedCRM Integration Support
-    email: integration@vedcrm.example
-  license:
-    name: Proprietary
-    identifier: LicenseRef-Proprietary
-
 servers:
   - url: https://api.vedcrm.com/v1
     description: Продуктивное окружение. ⚠️ Путь предварительный (версия /v1) — будет уточнён.
