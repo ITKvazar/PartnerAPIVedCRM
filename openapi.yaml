@@ -694,6 +694,7 @@ paths:
               bank_name: "ABN AMRO Bank N.V."
               bank_address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
               contract_number: "CNT-2024-0001"
+              created_by: "user_45682034"
       responses:
         '200':
           description: Заявка создана.
@@ -735,7 +736,7 @@ paths:
                   payment_date: null
                   payment_due_date: null
                   created_at: "2026-06-29T14:20:30Z"
-                  created_by: null
+                  created_by: "user_45682034"
         '400':
           description: |
             Ошибка бизнес-валидации (например неверный курс обмена или `deposit`,
@@ -794,6 +795,22 @@ paths:
           schema:
             type: string
           example: "CNT-2024-0001"
+        - name: created_from
+          in: query
+          required: false
+          description: Фильтр по дате создания заявки — начало периода (включительно). ISO-8601, UTC.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-01T00:00:00Z"
+        - name: created_to
+          in: query
+          required: false
+          description: Фильтр по дате создания заявки — конец периода (включительно). ISO-8601, UTC.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-30T23:59:59Z"
       responses:
         '200':
           description: Постраничный список заявок.
@@ -835,7 +852,7 @@ paths:
                     payment_date: "2026-06-30T10:00:00Z"
                     payment_due_date: "2026-07-15T23:59:59Z"
                     created_at: "2026-06-29T14:20:30Z"
-                    created_by: null
+                    created_by: "user_45682034"
                 total_count: 150
                 next_page_offset: 20
         '400':
@@ -901,7 +918,7 @@ paths:
                   payment_date: "2026-06-30T10:00:00Z"
                   payment_due_date: "2026-07-15T23:59:59Z"
                   created_at: "2026-06-29T14:20:30Z"
-                  created_by: null
+                  created_by: "user_45682034"
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1715,6 +1732,15 @@ components:
           type: string
           description: Номер контракта, по которому создаётся заявка.
           example: "CNT-2024-0001"
+        created_by:
+          type: [string, "null"]
+          description: |
+            Необязательное. Идентификатор отправителя на стороне партнёра — любое значение,
+            которое партнёр хочет сохранить для атрибуции «кто у него создал заявку»
+            (например, email или внутренний идентификатор пользователя). Сохраняется как есть
+            и возвращается без изменений в ответе (`Application.created_by`).
+            Ограничение соответствует БД: строка без ограничения длины.
+          example: "user_45682034"
 
     Recipient:
       type: object
@@ -1873,10 +1899,10 @@ components:
         created_by:
           type: [string, "null"]
           description: |
-            Пользователь, создавший заявку. Для заявок, созданных партнёром через API,
-            значение обычно `null` (заявка создана интеграцией, а не конкретным
-            пользователем). Если заполнено — содержит идентификатор/имя оператора.
-          example: null
+            Идентификатор отправителя на стороне партнёра — значение, переданное партнёром
+            в поле `created_by` при создании заявки (`POST /applications`). Возвращается без
+            изменений. `null`, если партнёр не передавал значение.
+          example: "user_45682034"
 
     SingleApplicationResponse:
       type: object
