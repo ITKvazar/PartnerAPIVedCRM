@@ -651,8 +651,7 @@ paths:
       operationId: createApplication
       description: |
         Создаёт заявку на платёж. Заявка создаётся в статусе `on_inspect` (на проверке).
-        При успешном создании возвращается `200 OK` (HTTP-код успеха не переопределён на
-        стороне сервиса).
+        При успешном создании возвращается `201 Created`.
 
         Особенности валидации:
         - `currency_code` сопоставляется с валютой в системе; курс берётся из справочника.
@@ -689,7 +688,7 @@ paths:
               contract_id: "550e8400-e29b-41d4-a716-446655440000"
               created_by: "user_45682034"
       responses:
-        '200':
+        '201':
           description: Заявка создана.
           content:
             application/json:
@@ -945,6 +944,13 @@ paths:
         Прикладывает документ к ранее созданной заявке. Передаётся как
         `multipart/form-data`. Порядок работы: сначала создаётся заявка
         (`POST /applications`), затем к ней прикладываются документы.
+
+        **Ограничения файла:**
+        - максимальный размер — **5 МБ**;
+        - допустимые форматы: **PDF** (`application/pdf`), **JPG** (`image/jpeg`),
+          **PNG** (`image/png`), **HEIC** (`image/heic`).
+
+        При превышении размера или недопустимом типе возвращается `400 Bad Request`.
       parameters:
         - $ref: '#/components/parameters/ApplicationId'
       requestBody:
@@ -955,7 +961,7 @@ paths:
               $ref: '#/components/schemas/DocumentUploadRequest'
             encoding:
               file:
-                contentType: application/octet-stream
+                contentType: application/pdf, image/jpeg, image/png, image/heic
             example:
               file: "<binary file content>"
               file_name: "invoice_INV-2024-001.pdf"
@@ -2001,7 +2007,10 @@ components:
         file:
           type: string
           format: binary
-          description: Бинарное содержимое файла документа (примеру не подлежит).
+          description: |
+            Бинарное содержимое файла документа (примеру не подлежит).
+            Максимум 5 МБ; форматы PDF (`application/pdf`), JPG (`image/jpeg`),
+            PNG (`image/png`), HEIC (`image/heic`).
         file_name:
           type: string
           description: Имя файла.
