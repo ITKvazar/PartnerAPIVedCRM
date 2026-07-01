@@ -588,24 +588,24 @@ paths:
             type: string
             pattern: '^[A-Z]{3}$'
           example: "USD"
-        - name: contract_number
+        - name: contract_id
           in: query
           required: true
-          description: Номер контракта, по которому выполняется расчёт.
+          description: Идентификатор контракта, по которому выполняется расчёт (получить в `GET /contracts`).
           schema:
             type: string
-          example: "CNT-2024-0001"
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
         - name: amount
           in: query
           required: true
           description: |
-            Сумма в валюте отправителя. Передаётся как десятичное число (`Decimal`).
+            Сумма в валюте отправителя (десятичное число строкой; >= 0.001, < 1e12, до 15 знаков после запятой).
           schema:
-            type: number
+            type: string
             format: decimal
-            minimum: 0.001
-            exclusiveMaximum: 1000000000000
-          example: 1000.50
+            pattern: '^\d+(\.\d+)?$'
+          example: "1000.50"
       responses:
         '200':
           description: Результат расчёта.
@@ -660,7 +660,8 @@ paths:
           обязан соответствовать переданным `deposit` и `amount`).
         - Для всех валют, кроме `RUB`, поле `deposit` обязано отличаться от `amount`.
           Для `RUB` это ограничение не применяется.
-        - `contract_number` сопоставляется с контрактом партнёра.
+        - `contract_id` сопоставляется с контрактом партнёра (контракт должен принадлежать
+          партнёру, иначе `404`).
 
         После создания заявки документы прикладываются отдельным методом
         `POST /applications/{application_id}/documents`.
@@ -685,7 +686,7 @@ paths:
               bank_swift: "ABNANL2A"
               bank_name: "ABN AMRO Bank N.V."
               bank_address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
-              contract_number: "CNT-2024-0001"
+              contract_id: "550e8400-e29b-41d4-a716-446655440000"
               created_by: "user_45682034"
       responses:
         '200':
@@ -724,6 +725,7 @@ paths:
                     address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
                   type: "export"
                   contract_number: "CNT-2024-0001"
+                  contract_id: "550e8400-e29b-41d4-a716-446655440000"
                   application_number: 42
                   payment_date: null
                   payment_due_date: null
@@ -780,13 +782,14 @@ paths:
           schema:
             $ref: '#/components/schemas/ApplicationStatusEnum'
           example: "queued_for_payout"
-        - name: contract_number
+        - name: contract_id
           in: query
           required: false
-          description: Фильтр по номеру контракта заявки.
+          description: Фильтр по идентификатору контракта заявки (получить в `GET /contracts`).
           schema:
             type: string
-          example: "CNT-2024-0001"
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
         - name: created_from
           in: query
           required: false
@@ -840,6 +843,7 @@ paths:
                       address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
                     type: "export"
                     contract_number: "CNT-2024-0001"
+                    contract_id: "550e8400-e29b-41d4-a716-446655440000"
                     application_number: 42
                     payment_date: "2026-06-30T10:00:00Z"
                     payment_due_date: "2026-07-15T23:59:59Z"
@@ -906,6 +910,7 @@ paths:
                     address: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
                   type: "export"
                   contract_number: "CNT-2024-0001"
+                  contract_id: "550e8400-e29b-41d4-a716-446655440000"
                   application_number: 42
                   payment_date: "2026-06-30T10:00:00Z"
                   payment_due_date: "2026-07-15T23:59:59Z"
@@ -968,7 +973,6 @@ paths:
                 content_type: "application/pdf"
                 file_name: "invoice_INV-2024-001.pdf"
                 url: "https://files.vedcrm.example/documents/880e8400.pdf"
-                s3_key: "applications/770e8400/invoice_INV-2024-001.pdf"
                 created_at: "2026-06-29T14:25:00Z"
                 application_id: "770e8400-e29b-41d4-a716-446655440010"
         '400':
@@ -1014,7 +1018,6 @@ paths:
                   content_type: "application/pdf"
                   file_name: "invoice_INV-2024-001.pdf"
                   url: "https://files.vedcrm.example/documents/880e8400.pdf"
-                  s3_key: "applications/770e8400/invoice_INV-2024-001.pdf"
                   created_at: "2026-06-29T14:25:00Z"
                   application_id: "770e8400-e29b-41d4-a716-446655440010"
                 - id: "990e8400-e29b-41d4-a716-446655440021"
@@ -1022,7 +1025,6 @@ paths:
                   content_type: "application/pdf"
                   file_name: "contract_CNT-2024-0001.pdf"
                   url: "https://files.vedcrm.example/documents/990e8400.pdf"
-                  s3_key: "applications/770e8400/contract_CNT-2024-0001.pdf"
                   created_at: "2026-06-29T14:26:00Z"
                   application_id: "770e8400-e29b-41d4-a716-446655440010"
         '400':
@@ -1055,8 +1057,13 @@ paths:
         Тело успешного ответа — бинарный поток PDF, поэтому `example` для него не приводится
         (неприменимо к бинарным данным).
 
-        Акт доступен только когда заявка достигла соответствующего статуса. Если заявка
-        ещё не в нужном статусе — возвращается `409 Conflict`.
+        **Доступность по статусу:** акт доступен только когда заявка находится в статусе
+        `done` (выполнена). Для всех остальных статусов (`on_inspect`, `confirmation`,
+        `queued_for_payout`, `payout`) возвращается `409 Conflict`. Если заявка не найдена
+        или принадлежит другому партнёру — `404 Not Found`.
+
+        _(Статус `done` — предварительное правило, требует подтверждения ВП; в текущем коде
+        проверка статуса ещё не реализована — доработка [BE].)_
       parameters:
         - $ref: '#/components/parameters/ApplicationId'
       responses:
@@ -1229,7 +1236,7 @@ components:
     TokenRefreshRequest:
       type: object
       description: Запрос на обновление токенов (OAuth2 refresh_token).
-      required: [grant_type, refresh_token]
+      required: [grant_type, refresh_token, client_id]
       properties:
         grant_type:
           type: string
@@ -1648,7 +1655,7 @@ components:
         - bank_swift
         - bank_name
         - bank_address
-        - contract_number
+        - contract_id
       properties:
         invoice_number:
           type: string
@@ -1720,10 +1727,14 @@ components:
           type: string
           description: Адрес банка получателя.
           example: "Gustav Mahlerlaan 10, 1082 PP Amsterdam"
-        contract_number:
+        contract_id:
           type: string
-          description: Номер контракта, по которому создаётся заявка.
-          example: "CNT-2024-0001"
+          format: uuid
+          description: |
+            Идентификатор контракта, по которому создаётся заявка. Получить в `GET /contracts`
+            (поле `id`). Используется вместо номера, т.к. номер контракта не гарантированно
+            уникален; `id` однозначно идентифицирует контракт.
+          example: "550e8400-e29b-41d4-a716-446655440000"
         created_by:
           type: [string, "null"]
           description: |
@@ -1866,8 +1877,13 @@ components:
           $ref: '#/components/schemas/ContractTypeEnum'
         contract_number:
           type: [string, "null"]
-          description: Номер контракта заявки.
+          description: Номер контракта заявки (для отображения).
           example: "CNT-2024-0001"
+        contract_id:
+          type: [string, "null"]
+          format: uuid
+          description: Идентификатор контракта заявки (для сопоставления с `GET /contracts`).
+          example: "550e8400-e29b-41d4-a716-446655440000"
         application_number:
           type: integer
           description: Порядковый номер заявки.
@@ -1989,7 +2005,7 @@ components:
     Document:
       type: object
       description: Документ заявки.
-      required: [id, type, file_name, s3_key, created_at, application_id]
+      required: [id, type, file_name, created_at, application_id]
       properties:
         id:
           type: string
@@ -2010,10 +2026,6 @@ components:
           type: [string, "null"]
           description: URL для скачивания (может отсутствовать).
           example: "https://files.vedcrm.example/documents/880e8400.pdf"
-        s3_key:
-          type: string
-          description: Ключ объекта в хранилище S3.
-          example: "applications/770e8400/invoice_INV-2024-001.pdf"
         created_at:
           type: string
           format: date-time
