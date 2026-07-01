@@ -1,0 +1,17 @@
+stateDiagram-v2
+    [*] --> on_inspect: Партнёр создаёт заявку<br/>POST /applications
+    on_inspect --> confirmation: менеджер
+    confirmation --> queued_for_payout: менеджер
+    queued_for_payout --> payout: менеджер
+    payout --> done: менеджер (SWIFT reference)
+    on_inspect --> rejected: менеджер
+    confirmation --> rejected: менеджер
+    queued_for_payout --> rejected: менеджер
+    payout --> rejected: менеджер
+    done --> [*]
+    rejected --> [*]
+    note right of on_inspect
+        Партнёр отслеживает статус через polling
+        (GET /applications/{id}).
+        Изменять и отменять заявку партнёр не может.
+    end note

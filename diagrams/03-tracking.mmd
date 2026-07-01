@@ -1,0 +1,13 @@
+sequenceDiagram
+    autonumber
+    participant P as Партнёр
+    participant API as VedCRM Partner API
+    participant M as Менеджер VedCRM
+    Note over M: обрабатывает заявку внутри системы,<br/>меняет статусы — партнёр этого не делает
+    loop Polling — раз в 30-60 сек
+        P->>API: GET /applications/{id}
+        API-->>P: текущий status и данные заявки
+    end
+    Note over P,API: статус дошёл до payout / done
+    P->>API: GET /applications/{id}/act
+    API-->>P: 200 · application/pdf — акт по заявке

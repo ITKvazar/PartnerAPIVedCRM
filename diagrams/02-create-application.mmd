@@ -1,0 +1,18 @@
+sequenceDiagram
+    autonumber
+    participant P as Партнёр
+    participant API as VedCRM Partner API
+    P->>API: GET /currencies
+    API-->>P: список валют + курсы
+    P->>API: GET /contracts
+    API-->>P: контракты партнёра (номер, валюта, тариф)
+    opt Предварительный расчёт
+        P->>API: GET /applications/calculate-deposit<br/>(currency_code, contract_number, amount)
+        API-->>P: deposit, fee, exchange_rate, tariff
+    end
+    P->>API: POST /applications (данные заявки)
+    API-->>P: 200 · заявка создана · status=on_inspect · application_id
+    loop Для каждого документа (инвойс и т.д.)
+        P->>API: POST /applications/{id}/documents<br/>(multipart: file, file_name, type=INVOICE)
+        API-->>P: 201 · документ прикреплён
+    end

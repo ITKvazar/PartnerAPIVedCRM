@@ -1,0 +1,14 @@
+sequenceDiagram
+    autonumber
+    participant P as Партнёр
+    participant API as VedCRM Partner API
+    Note over P,API: client_id / client_secret выданы заранее<br/>(онбординг — внутренний процесс, вне API)
+    P->>API: POST /auth/token (grant_type=client_credentials)
+    API-->>P: 200 · access_token (TTL ~4ч) + refresh_token (TTL ~2д)
+    P->>API: GET /... (Authorization: Bearer access_token)
+    API-->>P: 200 · данные
+    Note over P,API: срок access_token истёк
+    P->>API: запрос с истёкшим токеном
+    API-->>P: 401 Unauthorized
+    P->>API: POST /auth/token/refresh (refresh_token)
+    API-->>P: 200 · новая пара токенов
